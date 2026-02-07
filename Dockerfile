@@ -1,6 +1,10 @@
 # Build stage
 FROM golang:1.24-alpine AS builder
 
+# Automatically set by buildx based on target platform
+ARG TARGETOS
+ARG TARGETARCH
+
 WORKDIR /app
 
 # Copy go mod files
@@ -13,7 +17,7 @@ RUN go mod download
 COPY cmd/ cmd/
 
 # Build the application with ca-certificates embedded
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o oci-tag-proxy ./cmd/oci-tag-proxy
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -o oci-tag-proxy ./cmd/oci-tag-proxy
 
 # Runtime stage - use distroless for smaller image with ca-certificates
 FROM gcr.io/distroless/static-debian12:nonroot
