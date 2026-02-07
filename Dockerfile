@@ -16,7 +16,7 @@ COPY cmd/ cmd/
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o oci-tag-proxy ./cmd/oci-tag-proxy
 
 # Runtime stage - use distroless for smaller image with ca-certificates
-FROM gcr.io/distroless/static-debian12:latest
+FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 
