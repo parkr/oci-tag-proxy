@@ -34,10 +34,11 @@ var (
 
 // --- Models ---
 type Config struct {
-	Port         int
-	CacheDir     string
-	MaxTags      int
-	DockerHubJWT string
+	Port            int
+	CacheDir        string
+	MaxTags         int
+	DockerHubJWT    string
+	RefreshInterval time.Duration
 }
 
 type ImageTag struct {
@@ -48,8 +49,9 @@ type ImageTag struct {
 }
 
 type TagCache struct {
-	ImageName string     `json:"image_name"`
-	Tags      []ImageTag `json:"tags"`
+	ImageName     string     `json:"image_name"`
+	Tags          []ImageTag `json:"tags"`
+	LastRefreshed time.Time  `json:"last_refreshed"`
 }
 
 var (
@@ -69,9 +71,31 @@ func init() {
 func getShardedPath(imageName string) string {
 	safeName := strings.ReplaceAll(imageName, "/", "_")
 	p1, p2 := "default", "default"
-	if len(safeName) > 0 { p1 = string(safeName[0]) }
-	if len(safeName) > 1 { p2 = safeName[0:2] }
+	if len(safeName) > 0 {
+		p1 = string(safeName[0])
+	}
+	if len(safeName) > 1 {
+		p2 = safeName[0:2]
+	}
 	return filepath.Join(cfg.CacheDir, p1, p2, safeName+".json")
+}
+
+// readFromCache returns cached tags, whether cache exists, and whether it's stale
+func readFromCache(imageName string) (tags []ImageTag, exists bool, stale bool) {
+	path := getShardedPath(imageName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, false
+	}
+	var cache TagCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil, false, false
+	}
+	if len(cache.Tags) == 0 {
+		return nil, false, false
+	}
+	isStale := cfg.RefreshInterval > 0 && time.Since(cache.LastRefreshed) > cfg.RefreshInterval
+	return cache.Tags, true, isStale
 }
 
 // --- Registry & Manifest Logic ---
@@ -84,24 +108,32 @@ func getAuthToken(registry, image string) (string, error) {
 		url = fmt.Sprintf("https://auth.docker.io/token?service=registry.docker.io&scope=repository:%s:pull", image)
 	}
 	resp, err := httpClient.Get(url)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	defer resp.Body.Close()
-	var auth struct{ Token string `json:"token"` }
+	var auth struct {
+		Token string `json:"token"`
+	}
 	json.NewDecoder(resp.Body).Decode(&auth)
 	return auth.Token, nil
 }
 
 func getManifestMetadata(registry, token, image, tag, cachedDigest string) (string, []string, error) {
 	url := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, image, tag)
-	
+
 	req, _ := http.NewRequest("HEAD", url, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json")
 
 	retryableReq, err := retryablehttp.FromRequest(req)
-	if err != nil { return "", nil, err }
+	if err != nil {
+		return "", nil, err
+	}
 	resp, err := httpClient.Do(retryableReq)
-	if err != nil { return "", nil, err }
+	if err != nil {
+		return "", nil, err
+	}
 	defer resp.Body.Close()
 
 	newDigest := resp.Header.Get("Docker-Content-Digest")
@@ -112,9 +144,13 @@ func getManifestMetadata(registry, token, image, tag, cachedDigest string) (stri
 	// Fetch full manifest if digest changed
 	req.Method = "GET"
 	retryableReqGET, err := retryablehttp.FromRequest(req)
-	if err != nil { return newDigest, nil, err }
+	if err != nil {
+		return newDigest, nil, err
+	}
 	respGET, err := httpClient.Do(retryableReqGET)
-	if err != nil { return newDigest, nil, err }
+	if err != nil {
+		return newDigest, nil, err
+	}
 	defer respGET.Body.Close()
 
 	var data struct {
@@ -128,7 +164,9 @@ func getManifestMetadata(registry, token, image, tag, cachedDigest string) (stri
 
 	var archs []string
 	for _, m := range data.Manifests {
-		if m.Platform.Architecture != "" { archs = append(archs, m.Platform.Architecture) }
+		if m.Platform.Architecture != "" {
+			archs = append(archs, m.Platform.Architecture)
+		}
 	}
 	return newDigest, archs, nil
 }
@@ -143,9 +181,13 @@ func fetchDockerHub(image string) ([]ImageTag, error) {
 	url := fmt.Sprintf("https://hub.docker.com/v2/repositories/%s/tags/?page_size=100", image)
 	for url != "" {
 		req, _ := retryablehttp.NewRequest("GET", url, nil)
-		if cfg.DockerHubJWT != "" { req.Header.Set("Authorization", "JWT "+cfg.DockerHubJWT) }
+		if cfg.DockerHubJWT != "" {
+			req.Header.Set("Authorization", "JWT "+cfg.DockerHubJWT)
+		}
 		resp, err := httpClient.Do(req)
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		defer resp.Body.Close()
 
 		var data struct {
@@ -162,7 +204,9 @@ func fetchDockerHub(image string) ([]ImageTag, error) {
 			}
 		}
 		url = ""
-		if data.Next != nil { url = *data.Next }
+		if data.Next != nil {
+			url = *data.Next
+		}
 	}
 	return tags, nil
 }
@@ -172,7 +216,9 @@ func fetchGHCR(image string) ([]ImageTag, error) {
 	defer timer.ObserveDuration()
 
 	token, err := getAuthToken("ghcr.io", image)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
 	var tags []ImageTag
 	url := fmt.Sprintf("https://ghcr.io/v2/%s/tags/list?n=100", image)
@@ -181,15 +227,23 @@ func fetchGHCR(image string) ([]ImageTag, error) {
 		req, _ := http.NewRequest("GET", url, nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		retryableReq, err := retryablehttp.FromRequest(req)
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		resp, err := httpClient.Do(retryableReq)
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		defer resp.Body.Close()
 
-		var data struct{ Tags []string `json:"tags"` }
+		var data struct {
+			Tags []string `json:"tags"`
+		}
 		json.NewDecoder(resp.Body).Decode(&data)
 		for _, t := range data.Tags {
-			if !strings.HasSuffix(t, ".sig") { tags = append(tags, ImageTag{Name: t, LastUpdated: now}) }
+			if !strings.HasSuffix(t, ".sig") {
+				tags = append(tags, ImageTag{Name: t, LastUpdated: now})
+			}
 		}
 		link := resp.Header.Get("Link")
 		url = ""
@@ -216,42 +270,98 @@ func updateAndSaveCache(imageName, registryHost string, incoming []ImageTag) ([]
 	if data, err := os.ReadFile(path); err == nil {
 		var cache TagCache
 		json.Unmarshal(data, &cache)
-		for _, t := range cache.Tags { cacheMap[t.Name] = t }
+		for _, t := range cache.Tags {
+			cacheMap[t.Name] = t
+		}
 	}
 
 	token, _ := getAuthToken(registryHost, imageName)
 	for i, it := range incoming {
 		existing := cacheMap[it.Name]
 		digest, archs, err := getManifestMetadata(registryHost, token, imageName, it.Name, existing.Digest)
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 
 		incoming[i].Digest = digest
-		if archs != nil { incoming[i].Architectures = archs } else { incoming[i].Architectures = existing.Architectures }
+		if archs != nil {
+			incoming[i].Architectures = archs
+		} else {
+			incoming[i].Architectures = existing.Architectures
+		}
 		cacheMap[it.Name] = incoming[i]
 	}
 
 	var merged []ImageTag
-	for _, v := range cacheMap { merged = append(merged, v) }
+	for _, v := range cacheMap {
+		merged = append(merged, v)
+	}
 	sort.Slice(merged, func(i, j int) bool { return merged[i].LastUpdated.After(merged[j].LastUpdated) })
-	if len(merged) > cfg.MaxTags { merged = merged[:cfg.MaxTags] }
+	if len(merged) > cfg.MaxTags {
+		merged = merged[:cfg.MaxTags]
+	}
 
-	output, _ := json.MarshalIndent(TagCache{ImageName: imageName, Tags: merged}, "", "  ")
+	output, _ := json.MarshalIndent(TagCache{ImageName: imageName, Tags: merged, LastRefreshed: time.Now()}, "", "  ")
 	tmp := path + ".tmp"
 	os.WriteFile(tmp, output, 0644)
 	return merged, os.Rename(tmp, path)
+}
+
+func refreshCache(image, regType, host string) {
+	_, _, _ = requestGroup.Do(image, func() (interface{}, error) {
+		var tags []ImageTag
+		var err error
+		if regType == "ghcr" {
+			tags, err = fetchGHCR(image)
+		} else {
+			tags, err = fetchDockerHub(image)
+		}
+		if err != nil {
+			log.Printf("Background refresh failed for %s: %v", image, err)
+			return nil, err
+		}
+		_, err = updateAndSaveCache(image, host, tags)
+		if err != nil {
+			log.Printf("Background cache update failed for %s: %v", image, err)
+		}
+		return nil, err
+	})
 }
 
 func tagHandler(w http.ResponseWriter, r *http.Request) {
 	image := r.URL.Query().Get("image")
 	regType := r.URL.Query().Get("registry")
 	host := "registry-1.docker.io"
-	if regType == "ghcr" { host = "ghcr.io" }
+	if regType == "ghcr" {
+		host = "ghcr.io"
+	}
 
+	// Check cache first - return immediately if cached data exists
+	if cached, exists, stale := readFromCache(image); exists {
+		if stale {
+			// Trigger background refresh for stale cache
+			go refreshCache(image, regType, host)
+			opsCounter.WithLabelValues(regType, "cache_stale").Inc()
+		} else {
+			opsCounter.WithLabelValues(regType, "cache_hit").Inc()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(cached)
+		return
+	}
+
+	// Cache miss - fetch from registry
 	res, err, _ := requestGroup.Do(image, func() (interface{}, error) {
 		var tags []ImageTag
 		var err error
-		if regType == "ghcr" { tags, err = fetchGHCR(image) } else { tags, err = fetchDockerHub(image) }
-		if err != nil { return nil, err }
+		if regType == "ghcr" {
+			tags, err = fetchGHCR(image)
+		} else {
+			tags, err = fetchDockerHub(image)
+		}
+		if err != nil {
+			return nil, err
+		}
 		return updateAndSaveCache(image, host, tags)
 	})
 
@@ -266,17 +376,27 @@ func tagHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	var refreshIntervalStr string
 	flag.IntVar(&cfg.Port, "port", 8080, "Listen port")
 	flag.StringVar(&cfg.CacheDir, "dir", "./tag_cache", "Cache directory")
 	flag.IntVar(&cfg.MaxTags, "max-tags", 1000, "Max tags per image")
 	flag.StringVar(&cfg.DockerHubJWT, "jwt", "", "Docker Hub JWT")
+	flag.StringVar(&refreshIntervalStr, "refresh-interval", "24h", "Cache refresh interval (e.g., 1h, 24h, 7d)")
 	flag.Parse()
+
+	var err error
+	cfg.RefreshInterval, err = time.ParseDuration(refreshIntervalStr)
+	if err != nil {
+		log.Fatalf("Invalid refresh interval: %v", err)
+	}
 
 	httpClient = retryablehttp.NewClient()
 	httpClient.RetryMax = 3
 	httpClient.Logger = nil
 
-	os.MkdirAll(cfg.CacheDir, 0755)
+	if err = os.MkdirAll(cfg.CacheDir, 0755); err != nil {
+		log.Fatalf("Failed to create cache directory: %v", err)
+	}
 	http.HandleFunc("/tags", tagHandler)
 	http.Handle("/metrics", promhttp.Handler())
 
