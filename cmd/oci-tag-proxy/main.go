@@ -98,7 +98,9 @@ func getManifestMetadata(registry, token, image, tag, cachedDigest string) (stri
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json")
 
-	resp, err := httpClient.Do(retryablehttp.FromRequest(req))
+	retryableReq, err := retryablehttp.FromRequest(req)
+	if err != nil { return "", nil, err }
+	resp, err := httpClient.Do(retryableReq)
 	if err != nil { return "", nil, err }
 	defer resp.Body.Close()
 
@@ -109,7 +111,9 @@ func getManifestMetadata(registry, token, image, tag, cachedDigest string) (stri
 
 	// Fetch full manifest if digest changed
 	req.Method = "GET"
-	respGET, err := httpClient.Do(retryablehttp.FromRequest(req))
+	retryableReqGET, err := retryablehttp.FromRequest(req)
+	if err != nil { return newDigest, nil, err }
+	respGET, err := httpClient.Do(retryableReqGET)
 	if err != nil { return newDigest, nil, err }
 	defer respGET.Body.Close()
 
@@ -176,7 +180,9 @@ func fetchGHCR(image string) ([]ImageTag, error) {
 	for url != "" {
 		req, _ := http.NewRequest("GET", url, nil)
 		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := httpClient.Do(retryablehttp.FromRequest(req))
+		retryableReq, err := retryablehttp.FromRequest(req)
+		if err != nil { return nil, err }
+		resp, err := httpClient.Do(retryableReq)
 		if err != nil { return nil, err }
 		defer resp.Body.Close()
 
