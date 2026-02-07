@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -318,31 +319,31 @@ func TestTagHandler_RegistryHostSelection(t *testing.T) {
 	defer cleanup()
 
 	tests := []struct {
-		name     string
-		registry string
+		name      string
+		imageName string
+		registry  string
 	}{
-		{"docker registry", "docker"},
-		{"ghcr registry", "ghcr"},
-		{"empty registry defaults to docker", ""},
+		{"docker registry", "test/docker-registry", "docker"},
+		{"ghcr registry", "test/ghcr-registry", "ghcr"},
+		{"empty registry defaults to docker", "test/default-registry", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			imageName := "test/registry-test-" + tt.registry
 			cache := TagCache{
-				ImageName:     imageName,
+				ImageName:     tt.imageName,
 				LastRefreshed: time.Now(),
 				Tags: []ImageTag{
 					{Name: "v1.0.0", LastUpdated: time.Now()},
 				},
 			}
 
-			path := getShardedPath(imageName)
+			path := getShardedPath(tt.imageName)
 			os.MkdirAll(filepath.Dir(path), 0755)
 			data, _ := json.Marshal(cache)
 			os.WriteFile(path, data, 0644)
 
-			req := httptest.NewRequest("GET", "/tags?image="+imageName+"&registry="+tt.registry, nil)
+			req := httptest.NewRequest("GET", "/tags?image="+tt.imageName+"&registry="+tt.registry, nil)
 			w := httptest.NewRecorder()
 
 			tagHandler(w, req)
@@ -669,7 +670,10 @@ func TestTagHandler_MissingImageParameter(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	tagHandler(w, req)
-	// Should handle gracefully without panicking
+	
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for missing image parameter, got %d", w.Code)
+	}
 }
 
 func TestTagHandler_EmptyImage(t *testing.T) {
@@ -680,5 +684,163 @@ func TestTagHandler_EmptyImage(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	tagHandler(w, req)
-	// Should handle empty image gracefully
+	
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for empty image, got %d", w.Code)
+	}
+}
+
+// --- Input validation tests ---
+
+func TestValidateInput_ValidInputs(t *testing.T) {
+	tests := []struct {
+		name     string
+		image    string
+		registry string
+	}{
+		{"docker hub library image", "library/nginx", "docker"},
+		{"ghcr image", "parkr/oci-tag-proxy", "ghcr"},
+		{"simple image name", "nginx", "docker"},
+		{"image with dots", "my.org/my.repo", "docker"},
+		{"image with hyphens", "my-org/my-repo", "ghcr"},
+		{"image with underscores", "my_org/my_repo", "docker"},
+		{"deeply nested", "org/sub/repo", "docker"},
+		{"single character", "a", "docker"},
+		{"mixed characters", "my-org.io/my_repo.v2", "ghcr"},
+		{"empty registry defaults to docker", "nginx", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateInput(tt.image, tt.registry)
+			if err != nil {
+				t.Errorf("validateInput(%q, %q) returned error: %v", tt.image, tt.registry, err)
+			}
+		})
+	}
+}
+
+func TestValidateInput_InvalidInputs(t *testing.T) {
+	tests := []struct {
+		name      string
+		image     string
+		registry  string
+		wantError string
+	}{
+		{"empty image", "", "docker", "image parameter is required"},
+		{"path traversal with ..", "../../etc/passwd", "docker", "image name cannot contain '..'"},
+		{"path traversal in path", "org/../etc/passwd", "docker", "image name cannot contain '..'"},
+		{"absolute path", "/etc/passwd", "docker", "image name cannot start with '/'"},
+		{"invalid registry", "nginx", "invalid", "registry must be 'docker' or 'ghcr'"},
+		{"registry typo", "nginx", "dockerhub", "registry must be 'docker' or 'ghcr'"},
+		{"invalid chars - semicolon", "image;rm -rf", "docker", "invalid image name format"},
+		{"invalid chars - ampersand", "image&malicious", "docker", "invalid image name format"},
+		{"invalid chars - pipe", "image|cat", "docker", "invalid image name format"},
+		{"invalid chars - backtick", "image`whoami`", "docker", "invalid image name format"},
+		{"invalid chars - dollar", "image$var", "docker", "invalid image name format"},
+		{"invalid chars - parentheses", "image()", "docker", "invalid image name format"},
+		{"invalid chars - brackets", "image[]", "docker", "invalid image name format"},
+		{"invalid chars - braces", "image{}", "docker", "invalid image name format"},
+		{"invalid chars - space", "my image", "docker", "invalid image name format"},
+		{"invalid chars - quotes", "image\"test\"", "docker", "invalid image name format"},
+		{"invalid chars - single quote", "image'test'", "docker", "invalid image name format"},
+		{"invalid chars - less than", "image<test", "docker", "invalid image name format"},
+		{"invalid chars - greater than", "image>test", "docker", "invalid image name format"},
+		{"invalid chars - asterisk", "image*", "docker", "invalid image name format"},
+		{"invalid chars - question mark", "image?", "docker", "invalid image name format"},
+		{"starts with special char", ".image", "docker", "invalid image name format"},
+		{"starts with hyphen", "-image", "docker", "invalid image name format"},
+		{"starts with underscore", "_image", "docker", "invalid image name format"},
+		{"starts with slash", "/image", "docker", "image name cannot start with '/'"},
+		{"ends with special char", "image.", "docker", "invalid image name format"},
+		{"ends with hyphen", "image-", "docker", "invalid image name format"},
+		{"ends with underscore", "image_", "docker", "invalid image name format"},
+		{"ends with slash", "image/", "docker", "invalid image name format"},
+		{"only special chars", "...", "docker", ".."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateInput(tt.image, tt.registry)
+			if err == nil {
+				t.Errorf("validateInput(%q, %q) expected error but got nil", tt.image, tt.registry)
+				return
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Errorf("validateInput(%q, %q) error = %v, want error containing %q", tt.image, tt.registry, err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestTagHandler_ValidationErrors(t *testing.T) {
+	cleanup := setupTestConfig(t)
+	defer cleanup()
+
+	tests := []struct {
+		name           string
+		url            string
+		expectedStatus int
+		errorContains  string
+	}{
+		{
+			name:           "missing image parameter",
+			url:            "/tags?registry=docker",
+			expectedStatus: http.StatusBadRequest,
+			errorContains:  "image parameter is required",
+		},
+		{
+			name:           "empty image parameter",
+			url:            "/tags?image=&registry=docker",
+			expectedStatus: http.StatusBadRequest,
+			errorContains:  "image parameter is required",
+		},
+		{
+			name:           "invalid registry",
+			url:            "/tags?image=nginx&registry=invalid",
+			expectedStatus: http.StatusBadRequest,
+			errorContains:  "registry must be 'docker' or 'ghcr'",
+		},
+		{
+			name:           "path traversal attempt",
+			url:            "/tags?image=../../etc/passwd&registry=docker",
+			expectedStatus: http.StatusBadRequest,
+			errorContains:  "..",
+		},
+		{
+			name:           "absolute path attempt",
+			url:            "/tags?image=/etc/passwd&registry=docker",
+			expectedStatus: http.StatusBadRequest,
+			errorContains:  "cannot start with '/'",
+		},
+		{
+			name:           "command injection attempt",
+			url:            "/tags?image=test%3Brm+-rf&registry=docker",
+			expectedStatus: http.StatusBadRequest,
+			errorContains:  "invalid image name format",
+		},
+		{
+			name:           "shell expansion attempt",
+			url:            "/tags?image=test$(whoami)&registry=docker",
+			expectedStatus: http.StatusBadRequest,
+			errorContains:  "invalid image name format",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tt.url, nil)
+			w := httptest.NewRecorder()
+
+			tagHandler(w, req)
+
+			if w.Code != tt.expectedStatus {
+				t.Errorf("expected status %d, got %d", tt.expectedStatus, w.Code)
+			}
+
+			if tt.errorContains != "" && !strings.Contains(w.Body.String(), tt.errorContains) {
+				t.Errorf("expected error containing %q, got %q", tt.errorContains, w.Body.String())
+			}
+		})
+	}
 }

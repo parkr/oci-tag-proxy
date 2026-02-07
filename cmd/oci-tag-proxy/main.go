@@ -59,6 +59,8 @@ var (
 	requestGroup singleflight.Group
 	fileMu       sync.Map
 	linkRegex    = regexp.MustCompile(`last=([^&>]+)`)
+	// imageRegex validates image names: alphanumeric, hyphens, underscores, dots, and slashes
+	imageRegex   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$`)
 	httpClient   *retryablehttp.Client
 )
 
@@ -328,9 +330,46 @@ func refreshCache(image, regType, host string) {
 	})
 }
 
+// validateInput validates the image and registry parameters from the request
+func validateInput(image, registry string) error {
+	// Validate image parameter
+	if image == "" {
+		return fmt.Errorf("image parameter is required")
+	}
+
+	// Ensure image name doesn't start with / (absolute path)
+	if strings.HasPrefix(image, "/") {
+		return fmt.Errorf("image name cannot start with '/'")
+	}
+
+	// Prevent path traversal attacks
+	if strings.Contains(image, "..") {
+		return fmt.Errorf("image name cannot contain '..'")
+	}
+
+	// Validate image format: must match allowed pattern
+	if !imageRegex.MatchString(image) {
+		return fmt.Errorf("invalid image name format")
+	}
+
+	// Validate registry parameter
+	if registry != "" && registry != "docker" && registry != "ghcr" {
+		return fmt.Errorf("registry must be 'docker' or 'ghcr'")
+	}
+
+	return nil
+}
+
 func tagHandler(w http.ResponseWriter, r *http.Request) {
 	image := r.URL.Query().Get("image")
 	regType := r.URL.Query().Get("registry")
+
+	// Validate input parameters
+	if err := validateInput(image, regType); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	host := "registry-1.docker.io"
 	if regType == "ghcr" {
 		host = "ghcr.io"
