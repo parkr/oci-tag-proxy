@@ -74,6 +74,10 @@ func getShardedPath(imageName string) string {
 	// Replace any path separators in the image name so that user input cannot
 	// introduce additional path components.
 	safeName := strings.ReplaceAll(imageName, "/", "_")
+	if safeName == "" {
+		// Fallback to a deterministic default to avoid empty path components.
+		safeName = "image"
+	}
 
 	// Derive sharding directories from the sanitized name. These are always
 	// single characters/slices, so they cannot contain path separators.
@@ -85,8 +89,13 @@ func getShardedPath(imageName string) string {
 		p2 = safeName[0:2]
 	}
 
-	// Ensure the cache directory itself is in a normalized form.
+	// Ensure the cache directory itself is in a normalized form. An empty
+	// cache directory is treated as the current working directory so that
+	// all cache files stay beneath a well-defined base.
 	baseDir := filepath.Clean(cfg.CacheDir)
+	if baseDir == "" || baseDir == "." {
+		baseDir = "."
+	}
 
 	// Construct the final file name and then take its base component to
 	// guarantee that the result is a single path element, even if
