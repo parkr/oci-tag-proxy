@@ -38,6 +38,7 @@ type Config struct {
 	CacheDir        string
 	MaxTags         int
 	DockerHubJWT    string
+	GitHubToken     string
 	RefreshInterval time.Duration
 }
 
@@ -139,9 +140,65 @@ func readFromCache(imageName string) (tags []ImageTag, exists bool, stale bool) 
 
 // --- Registry & Manifest Logic ---
 
+// fetchDockerHubJWT fetches a JWT from Docker Hub's login API
+func fetchDockerHubJWT() (string, error) {
+	username := os.Getenv("DOCKER_HUB_USERNAME")
+	password := os.Getenv("DOCKER_HUB_PASSWORD")
+
+	if username == "" || password == "" {
+		log.Println("Docker Hub username or password not set; proceeding unauthenticated.")
+		return "", nil
+	}
+
+	type loginRequest struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	type loginResponse struct {
+		Token string `json:"token"`
+	}
+
+	reqBody, err := json.Marshal(loginRequest{
+		Username: username,
+		Password: password,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal login request: %w", err)
+	}
+
+	req, err := retryablehttp.NewRequest("POST", "https://hub.docker.com/v2/users/login/", strings.NewReader(string(reqBody)))
+	if err != nil {
+		return "", fmt.Errorf("failed to create login request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to login to Docker Hub: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Docker Hub login failed with status %d", resp.StatusCode)
+	}
+
+	var loginResp loginResponse
+	if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
+		return "", fmt.Errorf("failed to decode login response: %w", err)
+	}
+
+	log.Println("Successfully authenticated with Docker Hub")
+	return loginResp.Token, nil
+}
+
 func getAuthToken(registry, image string) (string, error) {
 	var url string
 	if registry == "ghcr.io" {
+		// If GITHUB_TOKEN is set, use it directly for GHCR authentication
+		if cfg.GitHubToken != "" {
+			return cfg.GitHubToken, nil
+		}
 		url = fmt.Sprintf("https://ghcr.io/token?scope=repository:%s:pull&service=ghcr.io", image)
 	} else {
 		url = fmt.Sprintf("https://auth.docker.io/token?service=registry.docker.io&scope=repository:%s:pull", image)
@@ -497,7 +554,6 @@ func main() {
 	flag.IntVar(&cfg.Port, "port", 8080, "Listen port")
 	flag.StringVar(&cfg.CacheDir, "dir", "./tag_cache", "Cache directory")
 	flag.IntVar(&cfg.MaxTags, "max-tags", 1000, "Max tags per image")
-	flag.StringVar(&cfg.DockerHubJWT, "jwt", "", "Docker Hub JWT")
 	flag.StringVar(&refreshIntervalStr, "refresh-interval", "24h", "Cache refresh interval (e.g., 1h, 24h, 7d)")
 	flag.Parse()
 
@@ -505,6 +561,18 @@ func main() {
 	cfg.RefreshInterval, err = time.ParseDuration(refreshIntervalStr)
 	if err != nil {
 		log.Fatalf("Invalid refresh interval: %v", err)
+	}
+
+	// Read authentication tokens from environment variables
+	cfg.GitHubToken = os.Getenv("GITHUB_TOKEN")
+	if cfg.GitHubToken != "" {
+		log.Println("Using GITHUB_TOKEN for GHCR authentication")
+	}
+
+	// Fetch Docker Hub JWT if credentials are available
+	cfg.DockerHubJWT, err = fetchDockerHubJWT()
+	if err != nil {
+		log.Printf("Warning: Failed to fetch Docker Hub JWT: %v", err)
 	}
 
 	httpClient = retryablehttp.NewClient()
