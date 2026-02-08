@@ -271,17 +271,24 @@ func updateAndSaveCache(imageName, registryHost string, incoming []ImageTag) ([]
 	cacheMap := make(map[string]ImageTag)
 	if data, err := os.ReadFile(path); err == nil {
 		var cache TagCache
-		json.Unmarshal(data, &cache)
+		if err := json.Unmarshal(data, &cache); err != nil {
+			log.Printf("Error unmarshaling cache for image=%s: %v", imageName, err)
+		}
 		for _, t := range cache.Tags {
 			cacheMap[t.Name] = t
 		}
 	}
 
-	token, _ := getAuthToken(registryHost, imageName)
+	token, err := getAuthToken(registryHost, imageName)
+	if err != nil {
+		log.Printf("Error getting auth token for image=%s registry=%s: %v", imageName, registryHost, err)
+	}
+	
 	for i, it := range incoming {
 		existing := cacheMap[it.Name]
 		digest, archs, err := getManifestMetadata(registryHost, token, imageName, it.Name, existing.Digest)
 		if err != nil {
+			log.Printf("Error getting manifest metadata for image=%s tag=%s: %v", imageName, it.Name, err)
 			continue
 		}
 
@@ -303,10 +310,24 @@ func updateAndSaveCache(imageName, registryHost string, incoming []ImageTag) ([]
 		merged = merged[:cfg.MaxTags]
 	}
 
-	output, _ := json.MarshalIndent(TagCache{ImageName: imageName, Tags: merged, LastRefreshed: time.Now()}, "", "  ")
+	output, err := json.MarshalIndent(TagCache{ImageName: imageName, Tags: merged, LastRefreshed: time.Now()}, "", "  ")
+	if err != nil {
+		log.Printf("Error marshaling cache for image=%s: %v", imageName, err)
+		return merged, err
+	}
+	
 	tmp := path + ".tmp"
-	os.WriteFile(tmp, output, 0644)
-	return merged, os.Rename(tmp, path)
+	if err := os.WriteFile(tmp, output, 0644); err != nil {
+		log.Printf("Error writing cache file for image=%s: %v", imageName, err)
+		return merged, err
+	}
+	
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("Error renaming cache file for image=%s: %v", imageName, err)
+		return merged, err
+	}
+	
+	return merged, nil
 }
 
 func refreshCache(image, regType, host string) {
@@ -361,11 +382,13 @@ func validateInput(image, registry string) error {
 }
 
 func tagHandler(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
 	image := r.URL.Query().Get("image")
 	regType := r.URL.Query().Get("registry")
 
 	// Validate input parameters
 	if err := validateInput(image, regType); err != nil {
+		log.Printf("Request failed: image=%s registry=%s error=%v latency=%v", image, regType, err, time.Since(startTime))
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -386,6 +409,8 @@ func tagHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(cached)
+		log.Printf("Request completed: image=%s registry=%s tags=%d cache_hit=%v cache_stale=%v latency=%v", 
+			image, regType, len(cached), !stale, stale, time.Since(startTime))
 		return
 	}
 
@@ -399,6 +424,7 @@ func tagHandler(w http.ResponseWriter, r *http.Request) {
 			tags, err = fetchDockerHub(image)
 		}
 		if err != nil {
+			log.Printf("Error fetching from upstream: image=%s registry=%s error=%v", image, regType, err)
 			return nil, err
 		}
 		return updateAndSaveCache(image, host, tags)
@@ -406,12 +432,17 @@ func tagHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		opsCounter.WithLabelValues(regType, "error").Inc()
+		log.Printf("Request failed: image=%s registry=%s error=%v latency=%v", image, regType, err, time.Since(startTime))
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	
+	tags := res.([]ImageTag)
 	opsCounter.WithLabelValues(regType, "success").Inc()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
+	log.Printf("Request completed: image=%s registry=%s tags=%d cache_hit=false latency=%v", 
+		image, regType, len(tags), time.Since(startTime))
 }
 
 func main() {
