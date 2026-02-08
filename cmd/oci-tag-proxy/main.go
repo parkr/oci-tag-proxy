@@ -563,6 +563,11 @@ func main() {
 		log.Fatalf("Invalid refresh interval: %v", err)
 	}
 
+	// Initialize HTTP client before fetching tokens
+	httpClient = retryablehttp.NewClient()
+	httpClient.RetryMax = 3
+	httpClient.Logger = nil
+
 	// Read authentication tokens from environment variables
 	cfg.GitHubToken = os.Getenv("GITHUB_TOKEN")
 	if cfg.GitHubToken != "" {
@@ -574,10 +579,6 @@ func main() {
 	if err != nil {
 		log.Printf("Warning: Failed to fetch Docker Hub JWT: %v", err)
 	}
-
-	httpClient = retryablehttp.NewClient()
-	httpClient.RetryMax = 3
-	httpClient.Logger = nil
 
 	if err = os.MkdirAll(cfg.CacheDir, 0755); err != nil {
 		log.Fatalf("Failed to create cache directory: %v", err)
