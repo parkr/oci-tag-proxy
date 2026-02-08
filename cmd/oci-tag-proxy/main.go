@@ -71,7 +71,12 @@ func init() {
 // --- Storage Logic ---
 
 func getShardedPath(imageName string) string {
+	// Replace any path separators in the image name so that user input cannot
+	// introduce additional path components.
 	safeName := strings.ReplaceAll(imageName, "/", "_")
+
+	// Derive sharding directories from the sanitized name. These are always
+	// single characters/slices, so they cannot contain path separators.
 	p1, p2 := "default", "default"
 	if len(safeName) > 0 {
 		p1 = string(safeName[0])
@@ -79,7 +84,16 @@ func getShardedPath(imageName string) string {
 	if len(safeName) > 1 {
 		p2 = safeName[0:2]
 	}
-	return filepath.Join(cfg.CacheDir, p1, p2, safeName+".json")
+
+	// Ensure the cache directory itself is in a normalized form.
+	baseDir := filepath.Clean(cfg.CacheDir)
+
+	// Construct the final file name and then take its base component to
+	// guarantee that the result is a single path element, even if
+	// safeName contained unexpected characters in the future.
+	cacheFile := filepath.Base(safeName + ".json")
+
+	return filepath.Join(baseDir, p1, p2, cacheFile)
 }
 
 // readFromCache returns cached tags, whether cache exists, and whether it's stale
