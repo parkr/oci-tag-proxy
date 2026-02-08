@@ -368,9 +368,9 @@ func TestTagHandler_RegistryHostSelection(t *testing.T) {
 			}
 
 			path, err := getShardedPath(tt.imageName)
-	if err != nil {
-		t.Fatalf("getShardedPath failed: %v", err)
-	}
+			if err != nil {
+				t.Fatalf("getShardedPath failed: %v", err)
+			}
 			os.MkdirAll(filepath.Dir(path), 0755)
 			data, _ := json.Marshal(cache)
 			os.WriteFile(path, data, 0644)
@@ -693,9 +693,9 @@ func TestGetShardedPath_SpecialCharacters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path, err := getShardedPath(tt.imageName)
-	if err != nil {
-		t.Fatalf("getShardedPath failed: %v", err)
-	}
+			if err != nil {
+				t.Fatalf("getShardedPath failed: %v", err)
+			}
 			if path == "" {
 				t.Error("expected non-empty path")
 			}
