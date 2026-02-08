@@ -74,10 +74,6 @@ func getShardedPath(imageName string) string {
 	// Replace any path separators in the image name so that user input cannot
 	// introduce additional path components.
 	safeName := strings.ReplaceAll(imageName, "/", "_")
-	if safeName == "" {
-		// Fallback to a deterministic default to avoid empty path components.
-		safeName = "image"
-	}
 
 	// Derive sharding directories from the sanitized name. These are always
 	// single characters/slices, so they cannot contain path separators.
