@@ -74,7 +74,7 @@ func TestGetShardedPath(t *testing.T) {
 			wantErr:   false,
 		},
 		{
-			name:      "empty name returns error",
+			name:      "empty name",
 			imageName: "",
 			wantPath:  "",
 			wantErr:   true,
