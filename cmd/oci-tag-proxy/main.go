@@ -89,12 +89,22 @@ func getShardedPath(imageName string) string {
 		p2 = safeName[0:2]
 	}
 
-	// Ensure the cache directory itself is in a normalized form. An empty
-	// cache directory is treated as the current working directory so that
-	// all cache files stay beneath a well-defined base.
-	baseDir := filepath.Clean(cfg.CacheDir)
+	// Ensure the cache directory itself is an absolute, normalized path.
+	// An empty or "." cache directory is resolved to the current working
+	// directory so that all cache files remain beneath a well-defined base.
+	baseDir := cfg.CacheDir
 	if baseDir == "" || baseDir == "." {
-		baseDir = "."
+		if cwd, err := os.Getwd(); err == nil {
+			baseDir = cwd
+		} else {
+			baseDir = "."
+		}
+	}
+	absBase, err := filepath.Abs(filepath.Clean(baseDir))
+	if err != nil {
+		// In the unlikely event of an error resolving the cache directory,
+		// fall back to a local relative directory.
+		absBase = "."
 	}
 
 	// Construct the final file name and then take its base component to
@@ -102,7 +112,7 @@ func getShardedPath(imageName string) string {
 	// safeName contained unexpected characters in the future.
 	cacheFile := filepath.Base(safeName + ".json")
 
-	return filepath.Join(baseDir, p1, p2, cacheFile)
+	return filepath.Join(absBase, p1, p2, cacheFile)
 }
 
 // readFromCache returns cached tags, whether cache exists, and whether it's stale
