@@ -47,43 +47,54 @@ func TestGetShardedPath(t *testing.T) {
 		name      string
 		imageName string
 		wantPath  string
+		wantErr   bool
 	}{
 		{
 			name:      "simple image name",
 			imageName: "nginx",
 			wantPath:  filepath.Join(cfg.CacheDir, "n", "ng", "nginx.json"),
+			wantErr:   false,
 		},
 		{
 			name:      "image with namespace",
 			imageName: "library/nginx",
 			wantPath:  filepath.Join(cfg.CacheDir, "l", "li", "library_nginx.json"),
+			wantErr:   false,
 		},
 		{
 			name:      "image with org and repo",
 			imageName: "myorg/myrepo",
 			wantPath:  filepath.Join(cfg.CacheDir, "m", "my", "myorg_myrepo.json"),
+			wantErr:   false,
 		},
 		{
 			name:      "single character name",
 			imageName: "a",
 			wantPath:  filepath.Join(cfg.CacheDir, "a", "default", "a.json"),
+			wantErr:   false,
 		},
 		{
 			name:      "empty name",
 			imageName: "",
-			wantPath:  filepath.Join(cfg.CacheDir, "default", "default", ".json"),
+			wantPath:  "",
+			wantErr:   true,
 		},
 		{
 			name:      "deeply nested path",
 			imageName: "org/sub/repo",
 			wantPath:  filepath.Join(cfg.CacheDir, "o", "or", "org_sub_repo.json"),
+			wantErr:   false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := getShardedPath(tt.imageName)
-			if got != tt.wantPath {
+			got, err := getShardedPath(tt.imageName)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("getShardedPath(%q) error = %v, wantErr %v", tt.imageName, err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got != tt.wantPath {
 				t.Errorf("getShardedPath(%q) = %q, want %q", tt.imageName, got, tt.wantPath)
 			}
 		})
@@ -122,7 +133,10 @@ func TestReadFromCache_ValidCache(t *testing.T) {
 		},
 	}
 
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		t.Fatalf("getShardedPath failed: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatalf("failed to create cache dir: %v", err)
 	}
@@ -159,7 +173,10 @@ func TestReadFromCache_StaleCache(t *testing.T) {
 		},
 	}
 
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		t.Fatalf("getShardedPath failed: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatalf("failed to create cache dir: %v", err)
 	}
@@ -192,7 +209,10 @@ func TestReadFromCache_EmptyTags(t *testing.T) {
 		Tags:          []ImageTag{},
 	}
 
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		t.Fatalf("getShardedPath failed: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatalf("failed to create cache dir: %v", err)
 	}
@@ -213,7 +233,10 @@ func TestReadFromCache_InvalidJSON(t *testing.T) {
 	defer cleanup()
 
 	imageName := "test/invalid-json"
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		t.Fatalf("getShardedPath failed: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatalf("failed to create cache dir: %v", err)
 	}
@@ -243,7 +266,10 @@ func TestReadFromCache_ZeroRefreshInterval(t *testing.T) {
 		},
 	}
 
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		t.Fatalf("getShardedPath failed: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatalf("failed to create cache dir: %v", err)
 	}
@@ -277,7 +303,10 @@ func TestTagHandler_CacheHit(t *testing.T) {
 		},
 	}
 
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		t.Fatalf("getShardedPath failed: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatalf("failed to create cache dir: %v", err)
 	}
@@ -338,7 +367,10 @@ func TestTagHandler_RegistryHostSelection(t *testing.T) {
 				},
 			}
 
-			path := getShardedPath(tt.imageName)
+			path, err := getShardedPath(tt.imageName)
+			if err != nil {
+				t.Fatalf("getShardedPath failed: %v", err)
+			}
 			os.MkdirAll(filepath.Dir(path), 0755)
 			data, _ := json.Marshal(cache)
 			os.WriteFile(path, data, 0644)
@@ -370,7 +402,10 @@ func TestTagHandler_StaleCacheTriggersRefresh(t *testing.T) {
 		},
 	}
 
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		t.Fatalf("getShardedPath failed: %v", err)
+	}
 	os.MkdirAll(filepath.Dir(path), 0755)
 	data, _ := json.Marshal(cache)
 	os.WriteFile(path, data, 0644)
@@ -558,7 +593,10 @@ func TestUpdateAndSaveCache_MergesExistingCache(t *testing.T) {
 		},
 	}
 
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		t.Fatalf("getShardedPath failed: %v", err)
+	}
 	os.MkdirAll(filepath.Dir(path), 0755)
 	data, _ := json.Marshal(existingCache)
 	os.WriteFile(path, data, 0644)
@@ -612,7 +650,10 @@ func TestReadFromCache_ConcurrentAccess(t *testing.T) {
 		},
 	}
 
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		t.Fatalf("getShardedPath failed: %v", err)
+	}
 	os.MkdirAll(filepath.Dir(path), 0755)
 	data, _ := json.Marshal(cache)
 	os.WriteFile(path, data, 0644)
@@ -651,7 +692,10 @@ func TestGetShardedPath_SpecialCharacters(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path := getShardedPath(tt.imageName)
+			path, err := getShardedPath(tt.imageName)
+			if err != nil {
+				t.Fatalf("getShardedPath failed: %v", err)
+			}
 			if path == "" {
 				t.Error("expected non-empty path")
 			}

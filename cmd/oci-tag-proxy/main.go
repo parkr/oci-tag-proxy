@@ -70,8 +70,18 @@ func init() {
 
 // --- Storage Logic ---
 
-func getShardedPath(imageName string) string {
+func getShardedPath(imageName string) (string, error) {
+	// Validate that imageName is not empty
+	if imageName == "" {
+		return "", fmt.Errorf("image name cannot be empty")
+	}
+
+	// Replace any path separators in the image name so that user input cannot
+	// introduce additional path components.
 	safeName := strings.ReplaceAll(imageName, "/", "_")
+
+	// Derive sharding directories from the sanitized name. These are always
+	// single characters/slices, so they cannot contain path separators.
 	p1, p2 := "default", "default"
 	if len(safeName) > 0 {
 		p1 = string(safeName[0])
@@ -79,12 +89,39 @@ func getShardedPath(imageName string) string {
 	if len(safeName) > 1 {
 		p2 = safeName[0:2]
 	}
-	return filepath.Join(cfg.CacheDir, p1, p2, safeName+".json")
+
+	// Ensure the cache directory itself is an absolute, normalized path.
+	// An empty or "." cache directory is resolved to the current working
+	// directory so that all cache files remain beneath a well-defined base.
+	baseDir := cfg.CacheDir
+	if baseDir == "" || baseDir == "." {
+		if cwd, err := os.Getwd(); err == nil {
+			baseDir = cwd
+		} else {
+			baseDir = "."
+		}
+	}
+	absBase, err := filepath.Abs(filepath.Clean(baseDir))
+	if err != nil {
+		// In the unlikely event of an error resolving the cache directory,
+		// fall back to a local relative directory.
+		absBase = "."
+	}
+
+	// Construct the final file name and then take its base component to
+	// guarantee that the result is a single path element, even if
+	// safeName contained unexpected characters in the future.
+	cacheFile := filepath.Base(safeName + ".json")
+
+	return filepath.Join(absBase, p1, p2, cacheFile), nil
 }
 
 // readFromCache returns cached tags, whether cache exists, and whether it's stale
 func readFromCache(imageName string) (tags []ImageTag, exists bool, stale bool) {
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		return nil, false, false
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false, false
@@ -265,23 +302,33 @@ func updateAndSaveCache(imageName, registryHost string, incoming []ImageTag) ([]
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
 
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		return nil, err
+	}
 	os.MkdirAll(filepath.Dir(path), 0755)
 
 	cacheMap := make(map[string]ImageTag)
 	if data, err := os.ReadFile(path); err == nil {
 		var cache TagCache
-		json.Unmarshal(data, &cache)
+		if err := json.Unmarshal(data, &cache); err != nil {
+			log.Printf("Error unmarshaling cache for image=%s: %v", imageName, err)
+		}
 		for _, t := range cache.Tags {
 			cacheMap[t.Name] = t
 		}
 	}
 
-	token, _ := getAuthToken(registryHost, imageName)
+	token, err := getAuthToken(registryHost, imageName)
+	if err != nil {
+		log.Printf("Error getting auth token for image=%s registry=%s: %v", imageName, registryHost, err)
+	}
+	
 	for i, it := range incoming {
 		existing := cacheMap[it.Name]
 		digest, archs, err := getManifestMetadata(registryHost, token, imageName, it.Name, existing.Digest)
 		if err != nil {
+			log.Printf("Error getting manifest metadata for image=%s tag=%s: %v", imageName, it.Name, err)
 			continue
 		}
 
@@ -303,10 +350,24 @@ func updateAndSaveCache(imageName, registryHost string, incoming []ImageTag) ([]
 		merged = merged[:cfg.MaxTags]
 	}
 
-	output, _ := json.MarshalIndent(TagCache{ImageName: imageName, Tags: merged, LastRefreshed: time.Now()}, "", "  ")
+	output, err := json.MarshalIndent(TagCache{ImageName: imageName, Tags: merged, LastRefreshed: time.Now()}, "", "  ")
+	if err != nil {
+		log.Printf("Error marshaling cache for image=%s: %v", imageName, err)
+		return merged, err
+	}
+	
 	tmp := path + ".tmp"
-	os.WriteFile(tmp, output, 0644)
-	return merged, os.Rename(tmp, path)
+	if err := os.WriteFile(tmp, output, 0644); err != nil {
+		log.Printf("Error writing cache file for image=%s: %v", imageName, err)
+		return merged, err
+	}
+	
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("Error renaming cache file for image=%s: %v", imageName, err)
+		return merged, err
+	}
+	
+	return merged, nil
 }
 
 func refreshCache(image, regType, host string) {
@@ -361,11 +422,13 @@ func validateInput(image, registry string) error {
 }
 
 func tagHandler(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
 	image := r.URL.Query().Get("image")
 	regType := r.URL.Query().Get("registry")
 
 	// Validate input parameters
 	if err := validateInput(image, regType); err != nil {
+		log.Printf("Request failed: image=%s registry=%s error=%v latency=%v", image, regType, err, time.Since(startTime))
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -386,6 +449,8 @@ func tagHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(cached)
+		log.Printf("Request completed: image=%s registry=%s tags=%d cache_hit=true cache_stale=%v latency=%v", 
+			image, regType, len(cached), stale, time.Since(startTime))
 		return
 	}
 
@@ -399,6 +464,7 @@ func tagHandler(w http.ResponseWriter, r *http.Request) {
 			tags, err = fetchDockerHub(image)
 		}
 		if err != nil {
+			log.Printf("Error fetching from upstream: image=%s registry=%s error=%v", image, regType, err)
 			return nil, err
 		}
 		return updateAndSaveCache(image, host, tags)
@@ -406,12 +472,24 @@ func tagHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		opsCounter.WithLabelValues(regType, "error").Inc()
+		log.Printf("Request failed: image=%s registry=%s error=%v latency=%v", image, regType, err, time.Since(startTime))
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	
+	tags, ok := res.([]ImageTag)
+	if !ok {
+		opsCounter.WithLabelValues(regType, "error").Inc()
+		log.Printf("Request failed: image=%s registry=%s error=invalid response type latency=%v", image, regType, time.Since(startTime))
+		http.Error(w, "Internal error: invalid response type", 500)
+		return
+	}
+	
 	opsCounter.WithLabelValues(regType, "success").Inc()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(res)
+	json.NewEncoder(w).Encode(tags)
+	log.Printf("Request completed: image=%s registry=%s tags=%d cache_hit=false latency=%v", 
+		image, regType, len(tags), time.Since(startTime))
 }
 
 func main() {
