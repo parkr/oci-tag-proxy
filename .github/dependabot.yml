@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Enable updates for Go modules
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Allow major version updates (this is the default behavior)
+    # By not specifying ignore conditions, all updates including major versions are allowed
+    open-pull-requests-limit: 10
+
+  # Enable updates for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Allow major version updates (this is the default behavior)
+    # By not specifying ignore conditions, all updates including major versions are allowed
+    open-pull-requests-limit: 10
