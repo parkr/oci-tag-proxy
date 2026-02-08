@@ -946,36 +946,6 @@ func TestFetchDockerHubJWT_WithMockServer(t *testing.T) {
 	cleanup := setupTestConfig(t)
 	defer cleanup()
 
-	// Create a mock Docker Hub login server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			t.Errorf("expected POST method, got %s", r.Method)
-		}
-		if r.URL.Path != "/v2/users/login/" {
-			t.Errorf("expected /v2/users/login/ path, got %s", r.URL.Path)
-		}
-		if r.Header.Get("Content-Type") != "application/json" {
-			t.Errorf("expected Content-Type application/json, got %s", r.Header.Get("Content-Type"))
-		}
-
-		var req struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("failed to decode request: %v", err)
-		}
-		if req.Username != "testuser" || req.Password != "testpass" {
-			t.Errorf("unexpected credentials: username=%s, password=%s", req.Username, req.Password)
-		}
-
-		response := map[string]string{
-			"token": "test-jwt-token-12345",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-	}))
-	defer server.Close()
 
 	os.Setenv("DOCKER_HUB_USERNAME", "testuser")
 	os.Setenv("DOCKER_HUB_PASSWORD", "testpass")
@@ -984,20 +954,20 @@ func TestFetchDockerHubJWT_WithMockServer(t *testing.T) {
 		os.Unsetenv("DOCKER_HUB_PASSWORD")
 	}()
 
-	// Temporarily replace the Docker Hub login URL
-	// Since we can't easily change the URL in the function, we'll just test
-	// that the function handles the credentials correctly
+	// Note: This test will attempt to connect to the real Docker Hub API.
+	// We're testing that the function properly reads environment variables
+	// and makes the request. The request will fail with invalid credentials,
+	// which is expected behavior.
 	jwt, err := fetchDockerHubJWT()
-	// This will fail to connect to the real Docker Hub without valid credentials
-	// but we're testing the logic path
 	if err != nil {
-		// Expected to fail when trying to connect to real Docker Hub
+		// Expected to fail when trying to connect to real Docker Hub with test credentials
 		if !strings.Contains(err.Error(), "failed to login") && !strings.Contains(err.Error(), "connection") {
-			t.Logf("Expected connection error, got: %v", err)
+			t.Logf("Expected login or connection error, got: %v", err)
 		}
 	}
-	// JWT will be empty on connection error
-	_ = jwt
+	if jwt != "" {
+		t.Errorf("expected empty JWT with invalid credentials, got %q", jwt)
+	}
 }
 
 func TestFetchDockerHubJWT_InvalidResponse(t *testing.T) {
@@ -1077,33 +1047,12 @@ func TestFetchDockerHub_WithAuthentication(t *testing.T) {
 	cleanup := setupTestConfig(t)
 	defer cleanup()
 
-	// Set up a mock server
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		// Verify that Authorization header is set correctly
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "JWT test-jwt-token" {
-			t.Errorf("expected Authorization header 'JWT test-jwt-token', got %q", authHeader)
-		}
-
-		response := map[string]interface{}{
-			"next": nil,
-			"results": []map[string]interface{}{
-				{"name": "v1.0.0", "last_updated": "2024-01-01T00:00:00Z"},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-	}))
-	defer server.Close()
-
 	cfg.DockerHubJWT = "test-jwt-token"
 
-	// Note: We can't easily test fetchDockerHub with a mock server
-	// because it uses a hardcoded URL. This test verifies the config field exists.
+	// Verify that JWT is set in config and will be used in fetchDockerHub
+	// (actual HTTP calls would require a mock server or integration test)
 	if cfg.DockerHubJWT != "test-jwt-token" {
-		t.Errorf("expected DockerHubJWT to be set")
+		t.Errorf("expected DockerHubJWT to be set to 'test-jwt-token', got %q", cfg.DockerHubJWT)
 	}
 }
 
