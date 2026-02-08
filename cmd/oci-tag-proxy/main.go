@@ -409,8 +409,8 @@ func tagHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(cached)
-		log.Printf("Request completed: image=%s registry=%s tags=%d cache_hit=%v cache_stale=%v latency=%v", 
-			image, regType, len(cached), !stale, stale, time.Since(startTime))
+		log.Printf("Request completed: image=%s registry=%s tags=%d cache_hit=true cache_stale=%v latency=%v", 
+			image, regType, len(cached), stale, time.Since(startTime))
 		return
 	}
 
@@ -437,10 +437,17 @@ func tagHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	tags := res.([]ImageTag)
+	tags, ok := res.([]ImageTag)
+	if !ok {
+		opsCounter.WithLabelValues(regType, "error").Inc()
+		log.Printf("Request failed: image=%s registry=%s error=invalid response type latency=%v", image, regType, time.Since(startTime))
+		http.Error(w, "Internal error: invalid response type", 500)
+		return
+	}
+	
 	opsCounter.WithLabelValues(regType, "success").Inc()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(res)
+	json.NewEncoder(w).Encode(tags)
 	log.Printf("Request completed: image=%s registry=%s tags=%d cache_hit=false latency=%v", 
 		image, regType, len(tags), time.Since(startTime))
 }
