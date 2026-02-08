@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -167,7 +168,7 @@ func fetchDockerHubJWT() (string, error) {
 		return "", fmt.Errorf("failed to marshal login request: %w", err)
 	}
 
-	req, err := retryablehttp.NewRequest("POST", "https://hub.docker.com/v2/users/login/", strings.NewReader(string(reqBody)))
+	req, err := retryablehttp.NewRequest("POST", "https://hub.docker.com/v2/users/login/", bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create login request: %w", err)
 	}

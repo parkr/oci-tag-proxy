@@ -946,7 +946,6 @@ func TestFetchDockerHubJWT_WithMockServer(t *testing.T) {
 	cleanup := setupTestConfig(t)
 	defer cleanup()
 
-
 	os.Setenv("DOCKER_HUB_USERNAME", "testuser")
 	os.Setenv("DOCKER_HUB_PASSWORD", "testpass")
 	defer func() {
