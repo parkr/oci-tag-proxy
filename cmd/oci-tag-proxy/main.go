@@ -70,7 +70,12 @@ func init() {
 
 // --- Storage Logic ---
 
-func getShardedPath(imageName string) string {
+func getShardedPath(imageName string) (string, error) {
+	// Validate that imageName is not empty
+	if imageName == "" {
+		return "", fmt.Errorf("image name cannot be empty")
+	}
+
 	// Replace any path separators in the image name so that user input cannot
 	// introduce additional path components.
 	safeName := strings.ReplaceAll(imageName, "/", "_")
@@ -108,12 +113,15 @@ func getShardedPath(imageName string) string {
 	// safeName contained unexpected characters in the future.
 	cacheFile := filepath.Base(safeName + ".json")
 
-	return filepath.Join(absBase, p1, p2, cacheFile)
+	return filepath.Join(absBase, p1, p2, cacheFile), nil
 }
 
 // readFromCache returns cached tags, whether cache exists, and whether it's stale
 func readFromCache(imageName string) (tags []ImageTag, exists bool, stale bool) {
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		return nil, false, false
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false, false
@@ -294,7 +302,10 @@ func updateAndSaveCache(imageName, registryHost string, incoming []ImageTag) ([]
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
 
-	path := getShardedPath(imageName)
+	path, err := getShardedPath(imageName)
+	if err != nil {
+		return nil, err
+	}
 	os.MkdirAll(filepath.Dir(path), 0755)
 
 	cacheMap := make(map[string]ImageTag)
