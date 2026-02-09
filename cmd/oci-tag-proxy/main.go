@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -216,6 +218,23 @@ func getAuthToken(registry, image string) (string, error) {
 	return auth.Token, nil
 }
 
+// enrichError extracts additional context from an error to make it more descriptive
+func enrichError(err error, operation, urlStr string) error {
+	if err == nil {
+		return nil
+	}
+	
+	// Try to extract URL error details
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		// If we have a url.Error, include the underlying error details
+		return fmt.Errorf("%s %s: %w", operation, urlStr, urlErr.Err)
+	}
+	
+	// Otherwise, just wrap with context
+	return fmt.Errorf("%s %s: %w", operation, urlStr, err)
+}
+
 func getManifestMetadata(registry, token, image, tag, cachedDigest string) (string, []string, error) {
 	url := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, image, tag)
 
@@ -229,9 +248,14 @@ func getManifestMetadata(registry, token, image, tag, cachedDigest string) (stri
 	}
 	resp, err := httpClient.Do(retryableReq)
 	if err != nil {
-		return "", nil, err
+		return "", nil, enrichError(err, "HEAD", url)
 	}
 	defer resp.Body.Close()
+	
+	// Check for non-2xx status codes
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", nil, fmt.Errorf("HEAD %s: unexpected status code %d", url, resp.StatusCode)
+	}
 
 	newDigest := resp.Header.Get("Docker-Content-Digest")
 	if newDigest != "" && newDigest == cachedDigest {
@@ -246,9 +270,14 @@ func getManifestMetadata(registry, token, image, tag, cachedDigest string) (stri
 	}
 	respGET, err := httpClient.Do(retryableReqGET)
 	if err != nil {
-		return newDigest, nil, err
+		return newDigest, nil, enrichError(err, "GET", url)
 	}
 	defer respGET.Body.Close()
+	
+	// Check for non-2xx status codes
+	if respGET.StatusCode < 200 || respGET.StatusCode >= 300 {
+		return newDigest, nil, fmt.Errorf("GET %s: unexpected status code %d", url, respGET.StatusCode)
+	}
 
 	var data struct {
 		Manifests []struct {
