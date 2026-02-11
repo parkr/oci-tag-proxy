@@ -1091,3 +1091,112 @@ func TestFetchGHCR_WithoutAuthentication(t *testing.T) {
 	}
 }
 
+func TestEnrichError(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		url       string
+		err       error
+		wantMsg   string
+	}{
+		{
+			name:      "nil error returns nil",
+			operation: "GET",
+			url:       "https://example.com",
+			err:       nil,
+			wantMsg:   "",
+		},
+		{
+			name:      "simple error is wrapped with context",
+			operation: "HEAD",
+			url:       "https://registry.example.com/v2/image/manifests/tag",
+			err:       http.ErrHandlerTimeout,
+			wantMsg:   "HEAD https://registry.example.com/v2/image/manifests/tag: http: Handler timeout",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := enrichError(tt.err, tt.operation, tt.url)
+			if tt.err == nil {
+				if result != nil {
+					t.Errorf("enrichError() = %v, want nil", result)
+				}
+			} else {
+				if result == nil {
+					t.Errorf("enrichError() = nil, want error")
+				} else if !strings.Contains(result.Error(), tt.wantMsg) {
+					t.Errorf("enrichError() = %q, want to contain %q", result.Error(), tt.wantMsg)
+				}
+			}
+		})
+	}
+}
+
+func TestGetManifestMetadata_HTTPStatusCode(t *testing.T) {
+	cleanup := setupTestConfig(t)
+	defer cleanup()
+
+	tests := []struct {
+		name           string
+		statusCode     int
+		wantErrMessage string
+	}{
+		{
+			name:           "401 Unauthorized",
+			statusCode:     401,
+			wantErrMessage: "unexpected status code 401",
+		},
+		{
+			name:           "403 Forbidden",
+			statusCode:     403,
+			wantErrMessage: "unexpected status code 403",
+		},
+		{
+			name:           "404 Not Found",
+			statusCode:     404,
+			wantErrMessage: "unexpected status code 404",
+		},
+		{
+			name:           "500 Internal Server Error (retries and gives up)",
+			statusCode:     500,
+			wantErrMessage: "giving up after", // retryablehttp retries 5xx errors
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a mock TLS server that returns the specified status code
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+			}))
+			defer server.Close()
+
+			// Configure httpClient to trust the test server's certificate
+			httpClient.HTTPClient = server.Client()
+
+			// Parse the test server URL to get the host
+			testURL := strings.TrimPrefix(server.URL, "https://")
+
+			// Call getManifestMetadata with the test server
+			_, _, err := getManifestMetadata(testURL, "test-token", "test/image", "v1.0", "")
+
+			// Verify error message contains expected text
+			if err == nil {
+				t.Errorf("expected error, got nil")
+			} else if !strings.Contains(err.Error(), tt.wantErrMessage) {
+				t.Errorf("error message %q does not contain %q", err.Error(), tt.wantErrMessage)
+			}
+			
+			// Additionally, verify that the error includes the operation and URL
+			if err != nil && !strings.Contains(err.Error(), "HEAD") {
+				t.Errorf("error message %q does not contain operation 'HEAD'", err.Error())
+			}
+			if err != nil && !strings.Contains(err.Error(), testURL) {
+				t.Errorf("error message %q does not contain URL %q", err.Error(), testURL)
+			}
+		})
+	}
+}
+
+
